@@ -113,7 +113,7 @@ public class SFTPFileSystem extends FileSystem {
 				channel.connect();
 				c = (ChannelSftp) channel;
 			} catch (JSchException e) {
-				throw new IOException(e.getMessage(), e.getCause());
+				throw new IOException(e);
 			}
 		}
 	}
@@ -146,6 +146,112 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
+	public FSDataOutputStream create(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
+		return createOutputStream(file, permission, overwrite, bufferSize, replication, blockSize, progress, ChannelSftp.OVERWRITE);
+	}
+
+	@Override
+	public FSDataOutputStream append(Path file, int bufferSize, Progressable progress) throws IOException {
+		return createOutputStream(file, null, true, bufferSize, (short)-1, -1, progress, ChannelSftp.APPEND);
+	}
+
+	private FSDataOutputStream createOutputStream(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress, int sftpMode) throws IOException {
+		try {
+			Path absolute = makeAbsolute(file);
+
+			if (exists(file) && !overwrite)
+				throw new IOException("File " + file + " exists");
+
+			Path parent = absolute.getParent();
+			if (parent == null)
+				parent = (parent == null) ? new Path("/").makeQualified(this) : parent;
+
+			if (!exists(parent))
+				mkdirs(parent, permission);
+
+			c.cd(parent.toUri().getPath());
+			return new FSDataOutputStream(c.put(file.getName(), sftpMode), statistics);
+		} catch (SftpException e) {
+			throw new IOException(e);
+		}
+	}
+
+	@Override
+	public boolean mkdirs(Path file, FsPermission permission) throws IOException {
+		try {
+			Path absolute = makeAbsolute(file);
+			if (!exists(absolute)) {
+				Path parent = absolute.getParent();
+				if (parent == null || mkdirs(parent, permission)) {
+					c.cd(parent.toUri().getPath());
+					c.mkdir(absolute.getName());
+				}
+			}
+			return true;
+		} catch (SftpException e) {
+			throw new IOException(e);
+		}
+	}
+
+	@Override
+	public boolean rename(Path src, Path dst) throws IOException {
+		try {
+			Path srcAbsolute = makeAbsolute(src);
+			Path dstAbsolute = makeAbsolute(dst);
+			c.rename(srcAbsolute.toUri().getPath(),
+			         dstAbsolute.toUri().getPath());
+			return true;
+		} catch (SftpException e) {
+			throw new IOException(e);
+		}
+	}
+
+	@Override
+	public boolean delete(Path file, boolean recursive) throws IOException {
+		try {
+			Path absolute = makeAbsolute(file);
+			String path = absolute.toUri().getPath();
+			if (!getFileStatus(absolute).isDir()) {
+				c.rm(path);
+				return true;
+			}
+
+			FileStatus[] dirEntries = listStatus(absolute);
+			if (dirEntries != null && dirEntries.length > 0 && !recursive)
+				throw new IOException("Directory: " + file + " is not empty.");
+
+			if (dirEntries != null) {
+				for (FileStatus dirEntry : dirEntries)
+					delete(new Path(absolute, dirEntry.getPath()), recursive);
+			}
+
+			c.rmdir(path);
+			return true;
+		} catch (SftpException e) {
+			throw new IOException(e);
+		}
+	}
+
+	@Override
+	public boolean delete(Path file) throws IOException {
+		return delete(file, false);
+	}
+
+	@Override
+	public void setTimes(Path file, long mtime, long atime) throws IOException {
+		try {
+			Path absolute = makeAbsolute(file);
+			String path = absolute.toUri().getPath();
+			SftpATTRS attrs = c.stat(path);
+			attrs.setACMODTIME(new Long(atime / 1000L).intValue(),
+			                   new Long(mtime / 1000L).intValue());
+			c.setStat(path, attrs);
+		} catch (SftpException e) {
+			throw new IOException(e);
+		}
+	}
+
+	@Override
 	public FileStatus getFileStatus(Path file) throws IOException {
 		try {
 			Path absolute = makeAbsolute(file);
@@ -153,7 +259,7 @@ public class SFTPFileSystem extends FileSystem {
 			if (absolute.getParent() == null)
 				return new FileStatus(-1, true, -1, -1, -1, new Path("/").makeQualified(this));
 
-			SftpATTRS attrs = c.lstat(absolute.toUri().getPath());
+			SftpATTRS attrs = c.stat(absolute.toUri().getPath());
 			return getFileStatus(attrs, file);
 		} catch (SftpException e) {
 			throw new IOException(e);
@@ -164,7 +270,7 @@ public class SFTPFileSystem extends FileSystem {
 		try {
 			if (attrs.isLink()) {
 				String linkDst = c.readlink(file.toUri().toString());
-				SftpATTRS linkDstAttrs = c.lstat(linkDst);
+				SftpATTRS linkDstAttrs = c.stat(linkDst);
 				URI linkUri = file.toUri();
 				URI uri = new URI(linkUri.getScheme(),
 				                  linkUri.getUserInfo(),
@@ -216,7 +322,7 @@ public class SFTPFileSystem extends FileSystem {
 	public boolean exists(Path file) {
 		try {
 			return getFileStatus(file) != null;
-		} catch (IOException ioe) {
+		} catch (IOException e) {
 			return false;
 		}
 	}
@@ -247,41 +353,23 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
-	public void setWorkingDirectory(Path workDir) {}
+	public void setWorkingDirectory(Path workDir) {
+		try {
+			Path absolute = makeAbsolute(workDir);
+			c.cd(absolute.toUri().getPath());
+		} catch (SftpException e) {
+			e.printStackTrace();
+		}
+	}
 
 	@Override
 	public Path getWorkingDirectory() {
-		return null;
-	}
-
-	@Override
-	public boolean rename(Path src, Path dst) throws IOException {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public boolean delete(Path file, boolean recursive) throws IOException {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public boolean delete(Path file) throws IOException {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public FSDataOutputStream create(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public boolean mkdirs(Path file, FsPermission permission) throws IOException {
-		throw new UnsupportedOperationException();
-	}
-
-	@Override
-	public FSDataOutputStream append(Path f, int bufferSize, Progressable progress) throws IOException {
-		throw new UnsupportedOperationException();
+		try {
+			return new Path(c.pwd());
+		} catch (SftpException e) {
+			e.printStackTrace();
+			return null;
+		}
 	}
 
 	static class MyUserInfo implements UserInfo {
