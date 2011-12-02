@@ -314,11 +314,6 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
-	public Path getHomeDirectory() {
-		return null;
-	}
-
-	@Override
 	public URI getUri() {
 		return uri;
 	}
