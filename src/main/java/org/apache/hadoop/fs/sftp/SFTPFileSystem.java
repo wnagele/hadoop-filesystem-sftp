@@ -275,7 +275,7 @@ public class SFTPFileSystem extends FileSystem {
 		if (!fileStat.isDir())
 			return new FileStatus[] { fileStat };
 
-		List<SFTPv3DirectoryEntry> sftpFiles = client.ls(path.toString());
+		List<SFTPv3DirectoryEntry> sftpFiles = client.ls(path.toUri().getPath());
 		ArrayList<FileStatus> fileStats = new ArrayList<FileStatus>(sftpFiles.size());
 		for (SFTPv3DirectoryEntry sftpFile : sftpFiles) {
 			String filename = sftpFile.filename;
