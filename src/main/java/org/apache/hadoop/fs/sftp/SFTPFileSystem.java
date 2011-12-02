@@ -20,11 +20,13 @@ import org.apache.hadoop.util.Progressable;
 
 import ch.ethz.ssh2.Connection;
 import ch.ethz.ssh2.KnownHosts;
+import ch.ethz.ssh2.SFTPException;
 import ch.ethz.ssh2.SFTPv3Client;
 import ch.ethz.ssh2.SFTPv3DirectoryEntry;
 import ch.ethz.ssh2.SFTPv3FileAttributes;
 import ch.ethz.ssh2.SFTPv3FileHandle;
 import ch.ethz.ssh2.ServerHostKeyVerifier;
+import ch.ethz.ssh2.sftp.ErrorCodes;
 
 /**
  * Based on implementation posted on Hadoop JIRA.
@@ -267,9 +269,15 @@ public class SFTPFileSystem extends FileSystem {
 		if (file.getParent() == null)
 			return new FileStatus(-1, true, -1, -1, -1, new Path("/").makeQualified(this));
 
-		String path = file.toUri().getPath();
-		SFTPv3FileAttributes attrs = client.stat(path);
-		return getFileStatus(attrs, file);
+		try {
+			String path = file.toUri().getPath();
+			SFTPv3FileAttributes attrs = client.stat(path);
+			return getFileStatus(attrs, file);
+		} catch (SFTPException e) {
+			if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
+				return null;
+			throw e;
+		}
 	}
 
 	private FileStatus getFileStatus(SFTPv3FileAttributes attrs, Path file) throws IOException {
