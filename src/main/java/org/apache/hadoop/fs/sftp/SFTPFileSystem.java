@@ -1,6 +1,7 @@
 package org.apache.hadoop.fs.sftp;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
@@ -275,7 +276,7 @@ public class SFTPFileSystem extends FileSystem {
 			return getFileStatus(attrs, file);
 		} catch (SFTPException e) {
 			if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
-				return null;
+				throw new FileNotFoundException(file.toString());
 			throw e;
 		}
 	}
