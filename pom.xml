@@ -43,9 +43,9 @@
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
-			<groupId>com.jcraft</groupId>
-			<artifactId>jsch</artifactId>
-			<version>0.1.38</version>
+			<groupId>org.jvnet.hudson</groupId>
+			<artifactId>ganymed-ssh-2</artifactId>
+			<version>build260</version>
 		</dependency>
 
 		<dependency>

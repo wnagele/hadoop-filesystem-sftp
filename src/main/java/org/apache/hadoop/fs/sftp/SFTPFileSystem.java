@@ -1,13 +1,15 @@
 package org.apache.hadoop.fs.sftp;
 
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
-import java.util.Vector;
+import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.BufferedFSInputStream;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
@@ -16,26 +18,27 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.Progressable;
 
-import com.jcraft.jsch.Channel;
-import com.jcraft.jsch.ChannelSftp;
-import com.jcraft.jsch.JSch;
-import com.jcraft.jsch.JSchException;
-import com.jcraft.jsch.Session;
-import com.jcraft.jsch.SftpATTRS;
-import com.jcraft.jsch.SftpException;
-import com.jcraft.jsch.UserInfo;
-import com.jcraft.jsch.ChannelSftp.LsEntry;
+import ch.ethz.ssh2.Connection;
+import ch.ethz.ssh2.KnownHosts;
+import ch.ethz.ssh2.SFTPv3Client;
+import ch.ethz.ssh2.SFTPv3DirectoryEntry;
+import ch.ethz.ssh2.SFTPv3FileAttributes;
+import ch.ethz.ssh2.SFTPv3FileHandle;
+import ch.ethz.ssh2.ServerHostKeyVerifier;
 
 /**
- * Based on implementation posted on Hadoop JIRA
+ * Based on implementation posted on Hadoop JIRA.
+ * Using Ganymede SSH lib for improved performance.
  * @see https://issues.apache.org/jira/browse/HADOOP-5732
  * @author wnagele
  */
 public class SFTPFileSystem extends FileSystem {
+	private final int MAX_BUFFER_SIZE = 32768;
 	private final int DEFAULT_PORT = 22;
 	private final String DEFAULT_KEY_FILE = "${user.home}/.ssh/id_rsa";
 	private final String DEFAULT_KNOWNHOSTS_FILE = "${user.home}/.ssh/known_hosts";
 
+	private final String PARAM_BUFFER_SIZE = "io.file.buffer.size";
 	private final String PARAM_HOST = "fs.sftp.host";
 	private final String PARAM_PORT = "fs.sftp.port";
 	private final String PARAM_USER = "fs.sftp.user";
@@ -46,13 +49,21 @@ public class SFTPFileSystem extends FileSystem {
 
 	private Configuration conf;
 	private URI uri;
-	private ChannelSftp c;
-	private Session session;
+	private SFTPv3Client client;
+	private Connection connection;
 
 	@Override
 	public void initialize(URI uri, Configuration conf) throws IOException {
+		Logger.getLogger("ch.ethz.ssh2").setLevel(Level.OFF);
+
 		this.uri = uri;
 		this.conf = conf;
+
+		// If no explicit buffer was set use the maximum.
+		// Also limit the buffer to the maximum value.
+		int bufferSize = conf.getInt(PARAM_BUFFER_SIZE, -1);
+		if (bufferSize > MAX_BUFFER_SIZE || bufferSize == -1)
+			conf.setInt(PARAM_BUFFER_SIZE, MAX_BUFFER_SIZE);
 
 		String host = uri.getHost();
 		if (host != null)
@@ -80,8 +91,8 @@ public class SFTPFileSystem extends FileSystem {
 		connect();
 	}
 
-	private void connect() throws IOException {
-		if (c == null || !c.isConnected()) {
+	protected void connect() throws IOException {
+		if (client == null || !client.isConnected()) {
 			String host = conf.get(PARAM_HOST);
 			int port = conf.getInt(PARAM_PORT, DEFAULT_PORT);
 			String key = conf.get(PARAM_KEY_FILE, DEFAULT_KEY_FILE);
@@ -90,232 +101,133 @@ public class SFTPFileSystem extends FileSystem {
 			String password = conf.get(PARAM_PASSWORD);
 			String knownHostsFile = conf.get(PARAM_KNOWNHOSTS, DEFAULT_KNOWNHOSTS_FILE);
 
-			JSch jsch = new JSch();
-			try {
-				jsch.setKnownHosts(knownHostsFile);
+			final KnownHosts knownHosts = new KnownHosts(new File(knownHostsFile));
 
-				if (key != null) {
-					if (keyPassword != null)
-						jsch.addIdentity(key, keyPassword);
-					else
-						jsch.addIdentity(key);
+			Connection conn = new Connection(host, port);
+			conn.connect(new ServerHostKeyVerifier() {
+				@Override
+				public boolean verifyServerHostKey(String hostname, int port, String serverHostKeyAlgorithm, byte[] serverHostKey) throws Exception {
+					if (knownHosts.verifyHostkey(hostname, serverHostKeyAlgorithm, serverHostKey) == KnownHosts.HOSTKEY_IS_OK)
+						return true;
+					throw new IOException("Couldn't verify host key for " + hostname);
 				}
+			});
 
-				session = jsch.getSession(user, host, port);
+			if (password != null)
+				conn.authenticateWithPassword(user, password);
+			else
+				conn.authenticateWithPublicKey(user, new File(key), keyPassword);
 
-				MyUserInfo ui = new MyUserInfo();
-				ui.setPassword(password);
-				session.setUserInfo(ui);
-
-				session.connect();
-
-				Channel channel = session.openChannel("sftp");
-				channel.connect();
-				c = (ChannelSftp) channel;
-			} catch (JSchException e) {
-				throw new IOException(e);
-			}
+			client = new SFTPv3Client(conn);
 		}
 	}
 
 	@Override
 	public void close() throws IOException {
 		super.close();
-		if (c != null && c.isConnected())
-			c.disconnect();
-		if (session != null && session.isConnected())
-			session.disconnect();
+		if (client != null && client.isConnected())
+			client.close();
+		if (connection != null)
+			connection.close();
+	}
+
+	@Override
+	public FSDataInputStream open(Path file) throws IOException {
+		SFTPInputStream is = openInternal(file);
+		return new FSDataInputStream(is);
 	}
 
 	@Override
 	public FSDataInputStream open(Path file, int bufferSize) throws IOException {
-		try {
-			Path absolute = makeAbsolute(file);
+		SFTPInputStream is = openInternal(file);
+		return new FSDataInputStream(new BufferedFSInputStream(is, bufferSize));
+	}
 
-			FileStatus fileStat = getFileStatus(absolute);
-			if (fileStat.isDir())
-				throw new IOException("Path " + file + " is a directory.");
+	private SFTPInputStream openInternal(Path file) throws IOException {
+		if (getFileStatus(file).isDir())
+			throw new IOException("Path " + file + " is a directory.");
 
-			Path parent = absolute.getParent();
-			c.cd(parent.toUri().getPath());
-			InputStream is = c.get(file.getName());
-			return new FSDataInputStream(new SFTPInputStream(is, statistics));
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		String path = file.toUri().getPath();
+		SFTPv3FileHandle handle = client.openFileRO(path);
+		SFTPInputStream is = new SFTPInputStream(handle, statistics);
+		return is;
 	}
 
 	@Override
 	public FSDataOutputStream create(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
-		return createOutputStream(file, permission, overwrite, bufferSize, replication, blockSize, progress, ChannelSftp.OVERWRITE);
+		throw new UnsupportedOperationException();
 	}
 
 	@Override
 	public FSDataOutputStream append(Path file, int bufferSize, Progressable progress) throws IOException {
-		return createOutputStream(file, null, true, bufferSize, (short)-1, -1, progress, ChannelSftp.APPEND);
-	}
-
-	private FSDataOutputStream createOutputStream(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress, int sftpMode) throws IOException {
-		try {
-			Path absolute = makeAbsolute(file);
-
-			if (exists(file) && !overwrite)
-				throw new IOException("File " + file + " exists");
-
-			Path parent = absolute.getParent();
-			if (parent == null)
-				parent = (parent == null) ? new Path("/").makeQualified(this) : parent;
-
-			if (!exists(parent))
-				mkdirs(parent, permission);
-
-			c.cd(parent.toUri().getPath());
-			return new FSDataOutputStream(c.put(file.getName(), sftpMode), statistics);
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		throw new UnsupportedOperationException();
 	}
 
 	@Override
 	public boolean mkdirs(Path file, FsPermission permission) throws IOException {
-		try {
-			Path absolute = makeAbsolute(file);
-			if (!exists(absolute)) {
-				Path parent = absolute.getParent();
-				if (parent == null || mkdirs(parent, permission)) {
-					c.cd(parent.toUri().getPath());
-					c.mkdir(absolute.getName());
-				}
-			}
-			return true;
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		throw new UnsupportedOperationException();
 	}
 
 	@Override
 	public boolean rename(Path src, Path dst) throws IOException {
-		try {
-			Path srcAbsolute = makeAbsolute(src);
-			Path dstAbsolute = makeAbsolute(dst);
-			c.rename(srcAbsolute.toUri().getPath(),
-			         dstAbsolute.toUri().getPath());
-			return true;
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		throw new UnsupportedOperationException();
 	}
 
 	@Override
 	public boolean delete(Path file, boolean recursive) throws IOException {
-		try {
-			Path absolute = makeAbsolute(file);
-			String path = absolute.toUri().getPath();
-			if (!getFileStatus(absolute).isDir()) {
-				c.rm(path);
-				return true;
-			}
-
-			FileStatus[] dirEntries = listStatus(absolute);
-			if (dirEntries != null && dirEntries.length > 0 && !recursive)
-				throw new IOException("Directory: " + file + " is not empty.");
-
-			if (dirEntries != null) {
-				for (FileStatus dirEntry : dirEntries)
-					delete(new Path(absolute, dirEntry.getPath()), recursive);
-			}
-
-			c.rmdir(path);
-			return true;
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		throw new UnsupportedOperationException();
 	}
 
 	@Override
 	public boolean delete(Path file) throws IOException {
-		return delete(file, false);
+		throw new UnsupportedOperationException();
 	}
 
 	@Override
 	public void setTimes(Path file, long mtime, long atime) throws IOException {
-		try {
-			Path absolute = makeAbsolute(file);
-			String path = absolute.toUri().getPath();
-			SftpATTRS attrs = c.stat(path);
-			attrs.setACMODTIME(new Long(atime / 1000L).intValue(),
-			                   new Long(mtime / 1000L).intValue());
-			c.setStat(path, attrs);
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		FileStatus status = getFileStatus(file);
+		String path = status.getPath().toUri().getPath();
+		SFTPv3FileAttributes attrs = client.stat(path);
+		attrs.mtime = new Long(mtime / 1000L).intValue();
+		attrs.atime = new Long(atime / 1000L).intValue();
+		client.setstat(path, attrs);
 	}
 
 	@Override
 	public FileStatus getFileStatus(Path file) throws IOException {
-		try {
-			Path absolute = makeAbsolute(file);
+		if (file.getParent() == null)
+			return new FileStatus(-1, true, -1, -1, -1, new Path("/").makeQualified(this));
 
-			if (absolute.getParent() == null)
-				return new FileStatus(-1, true, -1, -1, -1, new Path("/").makeQualified(this));
-
-			SftpATTRS attrs = c.stat(absolute.toUri().getPath());
-			return getFileStatus(attrs, file);
-		} catch (SftpException e) {
-			throw new IOException(e);
-		}
+		String path = file.toUri().getPath();
+		SFTPv3FileAttributes attrs = client.stat(path);
+		return getFileStatus(attrs, file);
 	}
 
-	private FileStatus getFileStatus(SftpATTRS attrs, Path file) throws IOException {
-		try {
-			if (attrs.isLink()) {
-				String linkDst = c.readlink(file.toUri().toString());
-				SftpATTRS linkDstAttrs = c.stat(linkDst);
-				URI linkUri = file.toUri();
-				URI uri = new URI(linkUri.getScheme(),
-				                  linkUri.getUserInfo(),
-				                  linkUri.getHost(),
-				                  linkUri.getPort(),
-				                  linkDst,
-				                  linkUri.getQuery(),
-				                  linkUri.getFragment());
-				return getFileStatus(linkDstAttrs, new Path(uri));
-			}
-
-			long length = attrs.getSize();
-			boolean isDir = attrs.isDir();
-			long modTime = new Integer(attrs.getMTime()).longValue() * 1000;
-			long accessTime = new Integer(attrs.getATime()).longValue() * 1000;
-			FsPermission permission = new FsPermission((short)attrs.getPermissions());
-			String user = Integer.toString(attrs.getUId());
-			String group = Integer.toString(attrs.getGId());
-			return new FileStatus(length, isDir, -1, -1, modTime, accessTime, permission, user, group, file);
-		} catch (SftpException e) {
-			throw new IOException(e);
-		} catch (URISyntaxException e) {
-			throw new IOException(e);
-		}
+	private FileStatus getFileStatus(SFTPv3FileAttributes attrs, Path file) throws IOException {
+		long length = attrs.size;
+		boolean isDir = attrs.isDirectory();
+		long modTime = new Integer(attrs.mtime).longValue() * 1000L;
+		long accessTime = new Integer(attrs.atime).longValue() * 1000L;
+		FsPermission permission = new FsPermission(new Integer(attrs.permissions).shortValue());
+		String user = Integer.toString(attrs.uid);
+		String group = Integer.toString(attrs.gid);
+		return new FileStatus(length, isDir, -1, -1, modTime, accessTime, permission, user, group, file);
 	}
 
 	@Override
 	public FileStatus[] listStatus(Path path) throws IOException {
-		try {
-			FileStatus fileStat = getFileStatus(path);
-			if (!fileStat.isDir())
-				return new FileStatus[] { fileStat };
+		FileStatus fileStat = getFileStatus(path);
+		if (!fileStat.isDir())
+			return new FileStatus[] { fileStat };
 
-			@SuppressWarnings("unchecked")
-			Vector<LsEntry> sftpFiles = c.ls(path.toUri().getPath());
-			ArrayList<FileStatus> fileStats = new ArrayList<FileStatus>(sftpFiles.size());
-			for (LsEntry sftpFile : sftpFiles) {
-				String filename = sftpFile.getFilename();
-				if (!"..".equals(filename) && !".".equals(filename))
-					fileStats.add(getFileStatus(sftpFile.getAttrs(), new Path(path, filename).makeQualified(this)));
-			}
-			return fileStats.toArray(new FileStatus[0]);
-		} catch (SftpException e) {
-			throw new IOException(e);
+		List<SFTPv3DirectoryEntry> sftpFiles = client.ls(path.toString());
+		ArrayList<FileStatus> fileStats = new ArrayList<FileStatus>(sftpFiles.size());
+		for (SFTPv3DirectoryEntry sftpFile : sftpFiles) {
+			String filename = sftpFile.filename;
+			if (!"..".equals(filename) && !".".equals(filename))
+				fileStats.add(getFileStatus(sftpFile.attributes, new Path(path, filename).makeQualified(this)));
 		}
+		return fileStats.toArray(new FileStatus[0]);
 	}
 
 	@Override
@@ -334,17 +246,7 @@ public class SFTPFileSystem extends FileSystem {
 
 	@Override
 	public Path getHomeDirectory() {
-		try {
-			return new Path(c.pwd()).makeQualified(this);
-		} catch (SftpException e) {
-			return null;
-		}
-	}
-
-	private Path makeAbsolute(Path path) throws SftpException {
-		if (path.isAbsolute())
-			return path;
-		return new Path(c.pwd(), path).makeQualified(this);
+		return null;
 	}
 
 	@Override
@@ -353,53 +255,10 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
-	public void setWorkingDirectory(Path workDir) {
-		try {
-			Path absolute = makeAbsolute(workDir);
-			c.cd(absolute.toUri().getPath());
-		} catch (SftpException e) {
-			e.printStackTrace();
-		}
-	}
+	public void setWorkingDirectory(Path workDir) {}
 
 	@Override
 	public Path getWorkingDirectory() {
-		try {
-			return new Path(c.pwd());
-		} catch (SftpException e) {
-			e.printStackTrace();
-			return null;
-		}
-	}
-
-	static class MyUserInfo implements UserInfo {
-		private String password = null;
-
-		public void setPassword(String ppassword) {
-			this.password = ppassword;
-		}
-
-		public String getPassword() {
-			return this.password;
-		}
-
-		public String getPassphrase() {
-			return null;
-		}
-
-		public boolean promptPassphrase(String arg0) {
-			return false;
-		}
-
-		public boolean promptPassword(String arg0) {
-			return true;
-		}
-
-		public boolean promptYesNo(String arg0) {
-			return false;
-		}
-
-		public void showMessage(String arg0) {
-		}
+		return null;
 	}
 }
