@@ -91,6 +91,31 @@ public class SFTPFileSystem extends FileSystem {
 		connect();
 	}
 
+	/**
+	 * The current implementation of @see KnownHosts does not support
+	 * known_hosts entries that use a non-default port.
+	 * If we encounter such an entry we wrap it into the known_hosts
+	 * format before looking it up.
+	 */
+	private class PortAwareKnownHosts extends KnownHosts {
+		public PortAwareKnownHosts(File knownHosts) throws IOException {
+			super(knownHosts);
+		}
+
+		public int verifyHostkey(String hostname, int port, String serverHostKeyAlgorithm, byte[] serverHostKey) throws IOException {
+			if (port != 22) {
+				StringBuffer sb = new StringBuffer();
+				sb.append('[');
+				sb.append(hostname);
+				sb.append("]:");
+				sb.append(port);
+				hostname = sb.toString();
+			}
+
+			return super.verifyHostkey(hostname, serverHostKeyAlgorithm, serverHostKey);
+		}
+	}
+
 	protected void connect() throws IOException {
 		if (client == null || !client.isConnected()) {
 			String host = conf.get(PARAM_HOST);
@@ -101,13 +126,13 @@ public class SFTPFileSystem extends FileSystem {
 			String password = conf.get(PARAM_PASSWORD);
 			String knownHostsFile = conf.get(PARAM_KNOWNHOSTS, DEFAULT_KNOWNHOSTS_FILE);
 
-			final KnownHosts knownHosts = new KnownHosts(new File(knownHostsFile));
+			final PortAwareKnownHosts knownHosts = new PortAwareKnownHosts(new File(knownHostsFile));
 
 			Connection conn = new Connection(host, port);
 			conn.connect(new ServerHostKeyVerifier() {
 				@Override
 				public boolean verifyServerHostKey(String hostname, int port, String serverHostKeyAlgorithm, byte[] serverHostKey) throws Exception {
-					if (knownHosts.verifyHostkey(hostname, serverHostKeyAlgorithm, serverHostKey) == KnownHosts.HOSTKEY_IS_OK)
+					if (knownHosts.verifyHostkey(hostname, port, serverHostKeyAlgorithm, serverHostKey) == KnownHosts.HOSTKEY_IS_OK)
 						return true;
 					throw new IOException("Couldn't verify host key for " + hostname);
 				}
