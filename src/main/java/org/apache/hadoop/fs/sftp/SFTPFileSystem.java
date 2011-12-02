@@ -180,17 +180,44 @@ public class SFTPFileSystem extends FileSystem {
 
 	@Override
 	public FSDataOutputStream create(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
-		throw new UnsupportedOperationException();
+		return createInternal(file, permission, overwrite, SFTPv3Client.SSH_FXF_CREAT | SFTPv3Client.SSH_FXF_WRITE | SFTPv3Client.SSH_FXF_TRUNC);
 	}
 
 	@Override
 	public FSDataOutputStream append(Path file, int bufferSize, Progressable progress) throws IOException {
-		throw new UnsupportedOperationException();
+		return createInternal(file, null, true, SFTPv3Client.SSH_FXF_WRITE | SFTPv3Client.SSH_FXF_APPEND);
+	}
+
+	protected FSDataOutputStream createInternal(Path file, FsPermission permission, boolean overwrite, int flags) throws IOException {
+		if (exists(file) && !overwrite)
+			throw new IOException("File " + file + " exists");
+
+		Path parent = file.getParent();
+		if (!exists(parent))
+			mkdirs(parent);
+
+		SFTPv3FileAttributes attrs = null;
+		if (permission != null) {
+			attrs = new SFTPv3FileAttributes();
+			attrs.permissions = new Short(permission.toShort()).intValue();
+		}
+
+		String path = file.toUri().getPath();
+		SFTPv3FileHandle handle = client.openFile(path, flags, attrs);
+		SFTPOutputStream os = new SFTPOutputStream(handle, statistics);
+		return new FSDataOutputStream(os, statistics);
 	}
 
 	@Override
 	public boolean mkdirs(Path file, FsPermission permission) throws IOException {
-		throw new UnsupportedOperationException();
+		if (!exists(file)) {
+			Path parent = file.getParent();
+			if (parent == null || mkdirs(parent, permission)) {
+				String path = file.toUri().getPath();
+				client.mkdir(path, permission.toShort());
+			}
+		}
+		return true;
 	}
 
 	@Override
