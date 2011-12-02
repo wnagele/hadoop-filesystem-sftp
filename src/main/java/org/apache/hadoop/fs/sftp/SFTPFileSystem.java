@@ -222,7 +222,10 @@ public class SFTPFileSystem extends FileSystem {
 
 	@Override
 	public boolean rename(Path src, Path dst) throws IOException {
-		throw new UnsupportedOperationException();
+		String oldPath = src.toUri().getPath();
+		String newPath = dst.toUri().getPath();
+		client.mv(oldPath, newPath);
+		return true;
 	}
 
 	@Override
