@@ -230,12 +230,26 @@ public class SFTPFileSystem extends FileSystem {
 
 	@Override
 	public boolean delete(Path file, boolean recursive) throws IOException {
-		throw new UnsupportedOperationException();
+		String path = file.toUri().getPath();
+		if (!getFileStatus(file).isDir()) {
+			client.rm(path);
+			return true;
+		}
+
+		FileStatus[] dirEntries = listStatus(file);
+		if (dirEntries != null && dirEntries.length > 0 && !recursive)
+			throw new IOException("Directory: " + file + " is not empty.");
+
+		for (FileStatus dirEntry : dirEntries)
+			delete(dirEntry.getPath(), recursive);
+
+		client.rmdir(path);
+		return true;
 	}
 
 	@Override
 	public boolean delete(Path file) throws IOException {
-		throw new UnsupportedOperationException();
+		return delete(file, false);
 	}
 
 	@Override
