@@ -131,8 +131,8 @@ public class SFTPFileSystem extends FileSystem {
 
 			final PortAwareKnownHosts knownHosts = new PortAwareKnownHosts(new File(knownHostsFile));
 
-			Connection conn = new Connection(host, port);
-			conn.connect(new ServerHostKeyVerifier() {
+			connection = new Connection(host, port);
+			connection.connect(new ServerHostKeyVerifier() {
 				@Override
 				public boolean verifyServerHostKey(String hostname, int port, String serverHostKeyAlgorithm, byte[] serverHostKey) throws Exception {
 					if (knownHosts.verifyHostkey(hostname, port, serverHostKeyAlgorithm, serverHostKey) == KnownHosts.HOSTKEY_IS_OK)
@@ -142,11 +142,11 @@ public class SFTPFileSystem extends FileSystem {
 			});
 
 			if (password != null)
-				conn.authenticateWithPassword(user, password);
+				connection.authenticateWithPassword(user, password);
 			else
-				conn.authenticateWithPublicKey(user, new File(key), keyPassword);
+				connection.authenticateWithPublicKey(user, new File(key), keyPassword);
 
-			client = new SFTPv3Client(conn);
+			client = new SFTPv3Client(connection);
 		}
 	}
 
