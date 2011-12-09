@@ -91,7 +91,13 @@ public class SFTPFileSystem extends FileSystem {
 
 		setConf(conf);
 
-		connect();
+		try {
+			connect();
+		} catch (IOException e) {
+			// Ensure to close down connections if we fail during initialization
+			close();
+			throw e;
+		}
 	}
 
 	/**
