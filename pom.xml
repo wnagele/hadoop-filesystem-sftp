@@ -9,7 +9,7 @@
           <java.version>1.7</java.version>
           <hadoop.version>2.5.0</hadoop.version>
           <cdh.version>cdh5.2.0</cdh.version>
-          <maven-assembly.version>2.4</maven-assembly.version>
+          <maven.assembly.version>2.4</maven.assembly.version>
           <junit.version>4.4</junit.version>
         </properties>
 
@@ -24,7 +24,7 @@
 			</plugin>
 			<plugin>
 				<artifactId>maven-assembly-plugin</artifactId>
-				<version>${maven-assembly.version}</version>
+				<version>${maven.assembly.version}</version>
 				<configuration>
 					<descriptorRefs>
 						<descriptorRef>jar-with-dependencies</descriptorRef>
