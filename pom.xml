@@ -5,18 +5,26 @@
 	<artifactId>hadoop-filesystem-sftp</artifactId>
 	<version>0.0.1-SNAPSHOT</version>
 
+        <properties>
+          <java.version>1.7</java.version>
+          <hadoop.version>2.5.0</hadoop.version>
+          <cdh.version>cdh5.2.0</cdh.version>
+          <maven.assembly.version>2.4</maven.assembly.version>
+          <junit.version>4.4</junit.version>
+        </properties>
+
 	<build>
 		<plugins>
 			<plugin>
 				<artifactId>maven-compiler-plugin</artifactId>
 				<configuration>
-					<source>1.6</source>
-					<target>1.6</target>
+					<source>${java.version}</source>
+					<target>${java.version}</target>
 				</configuration>
 			</plugin>
 			<plugin>
 				<artifactId>maven-assembly-plugin</artifactId>
-				<version>2.1</version>
+				<version>${maven.assembly.version}</version>
 				<configuration>
 					<descriptorRefs>
 						<descriptorRef>jar-with-dependencies</descriptorRef>
@@ -38,8 +46,8 @@
 	<dependencies>
 		<dependency>
 			<groupId>org.apache.hadoop</groupId>
-			<artifactId>hadoop-core</artifactId>
-			<version>0.20.2-cdh3u1</version>
+			<artifactId>hadoop-client</artifactId>
+			<version>${hadoop.version}-${cdh.version}</version>
 			<scope>provided</scope>
 		</dependency>
 		<dependency>
@@ -51,7 +59,7 @@
 		<dependency>
 			<groupId>junit</groupId>
 			<artifactId>junit</artifactId>
-			<version>4.4</version>
+			<version>${junit.version}</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>
@@ -59,7 +67,7 @@
 	<repositories>
 		<repository>
 			<id>cloudera</id>
-			<url>https://repository.cloudera.com/content/groups/cloudera-repos</url>
+                        <url>https://repository.cloudera.com/artifactory/cloudera-repos/</url>
 		</repository>
 	</repositories>
 </project>
