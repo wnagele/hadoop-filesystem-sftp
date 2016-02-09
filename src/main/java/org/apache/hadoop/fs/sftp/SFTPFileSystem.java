@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import ch.ethz.ssh2.*;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BufferedFSInputStream;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -19,14 +20,6 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.Progressable;
 
-import ch.ethz.ssh2.Connection;
-import ch.ethz.ssh2.KnownHosts;
-import ch.ethz.ssh2.SFTPException;
-import ch.ethz.ssh2.SFTPv3Client;
-import ch.ethz.ssh2.SFTPv3DirectoryEntry;
-import ch.ethz.ssh2.SFTPv3FileAttributes;
-import ch.ethz.ssh2.SFTPv3FileHandle;
-import ch.ethz.ssh2.ServerHostKeyVerifier;
 import ch.ethz.ssh2.sftp.ErrorCodes;
 
 /**
@@ -132,7 +125,7 @@ public class SFTPFileSystem extends FileSystem {
 			String key = conf.get(PARAM_KEY_FILE, DEFAULT_KEY_FILE);
 			String keyPassword = conf.get(PARAM_KEY_PASSWORD);
 			String user = conf.get(PARAM_USER);
-			String password = conf.get(PARAM_PASSWORD);
+			final String password = conf.get(PARAM_PASSWORD);
 			String knownHostsFile = conf.get(PARAM_KNOWNHOSTS, DEFAULT_KNOWNHOSTS_FILE);
 
 			final PortAwareKnownHosts knownHosts = new PortAwareKnownHosts(new File(knownHostsFile));
@@ -147,10 +140,30 @@ public class SFTPFileSystem extends FileSystem {
 				}
 			});
 
-			if (password != null)
-				connection.authenticateWithPassword(user, password);
-			else
-				connection.authenticateWithPublicKey(user, new File(key), keyPassword);
+			if (password != null) {
+                if (connection.isAuthMethodAvailable(user, "password")) {
+                    connection.authenticateWithPassword(user, password);
+                } else if (connection.isAuthMethodAvailable(user, "keyboard-interactive")) {
+                    connection.authenticateWithKeyboardInteractive(user, new InteractiveCallback() {
+                        @Override
+                        public String[] replyToChallenge(String name, String instruction, int numPrompts, String[] prompt, boolean[] echo) throws Exception {
+                            // on the first round server will ask password
+                            if (prompt.length == 1) {
+                                return new String[]{password};
+                            } else if (prompt.length > 1) {
+                                throw new IOException("Keyboard-interactive authentication requested something more than password!");
+                            } else {
+                                // some servers ask for an empty message before letting you in
+                                return new String[0];
+                            }
+                        }
+                    });
+                } else {
+                    throw new IOException("Password authentication methods exhausted!");
+                }
+            } else {
+                connection.authenticateWithPublicKey(user, new File(key), keyPassword);
+            }
 
 			client = new SFTPv3Client(connection);
 		}
