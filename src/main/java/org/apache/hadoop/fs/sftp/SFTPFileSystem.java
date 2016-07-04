@@ -42,6 +42,7 @@ import ch.ethz.ssh2.SFTPv3DirectoryEntry;
 import ch.ethz.ssh2.SFTPv3FileAttributes;
 import ch.ethz.ssh2.SFTPv3FileHandle;
 import ch.ethz.ssh2.ServerHostKeyVerifier;
+import ch.ethz.ssh2.InteractiveCallback;
 import ch.ethz.ssh2.sftp.ErrorCodes;
 
 /**
@@ -144,6 +145,7 @@ public class SFTPFileSystem extends FileSystem {
 	protected void connect() throws IOException {
 		
 		if (client == null || !client.isConnected()) {
+			
 			connection = getConnection();
 			LOG.info("Creating client");
 			client = new SFTPv3ClientWrapper(connection);
@@ -157,8 +159,7 @@ public class SFTPFileSystem extends FileSystem {
 		String key = conf.get(PARAM_KEY_FILE, DEFAULT_KEY_FILE);
 		String keyPassword = conf.get(PARAM_KEY_PASSWORD);
 		String user = conf.get(PARAM_USER);
-		String password = conf.get(PARAM_PASSWORD);
-
+		final String password = conf.get(PARAM_PASSWORD);
 		Connection connection = new Connection(host, port);
 
 		connection.connect(new ServerHostKeyVerifier() {
@@ -171,11 +172,29 @@ public class SFTPFileSystem extends FileSystem {
 			}
 		});
 
-		if (password != null)
-			connection.authenticateWithPassword(user, password);
-		else
-			connection.authenticateWithPublicKey(user, new File(key),
-					keyPassword);
+		if (password != null) {
+			if (connection.isAuthMethodAvailable(user, "password")) {
+				connection.authenticateWithPassword(user, password);
+			} else if (connection.isAuthMethodAvailable(user, "keyboard-interactive")) {
+				connection.authenticateWithKeyboardInteractive(user, new InteractiveCallback() {
+					@Override
+					public String[] replyToChallenge(String name, String instruction, int numPrompts, String[] prompt, boolean[] echo) throws Exception {
+						switch (prompt.length) {
+							case 0:
+								return new String[0];
+							case 1:
+								return new String[] { password };
+						}
+						throw new IOException("Cannot proceed with keyboard-interactive authentication. Server requested " + prompt.length + " challenges, we only support 1.");
+					}
+				});
+			} else {
+				throw new IOException("Server does not support any of our supported password authentication methods");
+			}
+		} else {
+			connection.authenticateWithPublicKey(user, new File(key), keyPassword);
+		}
+		
 		return connection;		
 	}
 	
