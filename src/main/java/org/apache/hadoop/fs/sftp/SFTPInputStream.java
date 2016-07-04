@@ -2,41 +2,49 @@ package org.apache.hadoop.fs.sftp;
 
 import java.io.IOException;
 
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FSInputStream;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.sftp.SFTPFileSystem.SFTPv3ClientWrapper;
 
 import ch.ethz.ssh2.SFTPv3Client;
 import ch.ethz.ssh2.SFTPv3FileHandle;
 
 public class SFTPInputStream extends FSInputStream {
+	public static final Log LOG = LogFactory.getLog(SFTPInputStream.class);
+	
+	public static final int MAX_READ_SIZE = 32768;
+	  
 	private SFTPv3FileHandle handle;
 	private FileSystem.Statistics stats;
 	private SFTPv3Client client;
 	private long pos = 0;
+	
 
 	public SFTPInputStream(SFTPv3FileHandle handle, FileSystem.Statistics stats) {
 		this.handle = handle;
 		this.stats = stats;
 		this.client = handle.getClient();
+		LOG.info("Creating file stream");
 	}
 
 	@Override
 	public void close() throws IOException {
+		LOG.info("closing input stream");
 		super.close();
-		client.closeFile(handle);
+		//client.closeFile(handle);
+		client.close();
+		if (client instanceof SFTPv3ClientWrapper) {
+			LOG.info("Closing specific connection");
+			((SFTPv3ClientWrapper)client).getConnection().close();
+		}
 	}
 
 	@Override
 	public synchronized int read() throws IOException {
 		byte[] buf = new byte[1];
-        int read = client.read(handle, pos, buf, 0, 1);
-        if (read == -1)
-        	return -1;
-
-        pos++;
-		if (stats != null)
-			stats.incrementBytesRead(1);
-        return buf[0];
+        return read(buf, 0, 1) == -1 ? -1 : buf[0] & 0xff;
 	}
 
 	@Override
@@ -46,15 +54,38 @@ public class SFTPInputStream extends FSInputStream {
 
 	@Override
 	public int read(long position, byte[] buf, int off, int len) throws IOException {
-        int read = client.read(handle, position, buf, off, len);
+		return readInternal(position, buf, off, len);
+//		int read = 1; 
+//		int total = 0; 
+//		while (read > 0 && len > 0) {
+//			read = readInternal(position + total, buf, off + total, len);
+//			if (read != -1) {
+//				total += read;
+//				len -= read;
+//			}
+//		}
+//		if (read == -1)
+//			return -1;
+//		return total;
+	}
+	
+	private int readInternal(long position, byte[] buf, int off, int len) throws IOException {
+		int fixedLen = len < MAX_READ_SIZE ? len : MAX_READ_SIZE;	//SFTP client only supports reads of up to 32768
+		LOG.debug("reading stream internal - pos=" + pos + " position="+ position + " off=" + off + " len=" + len + " fixedlen=" + fixedLen);
+		if (len == 0)
+			return 0;
+        int read = client.read(handle, position, buf, off, fixedLen);
+		LOG.debug("read from stream internal - read=" + read);
         if (read == -1)
         	return -1;
-
 		pos += read;
 		if (stats != null)
 			stats.incrementBytesRead(read);
-		return read;
+        return read;
+
 	}
+	
+	
 
 	@Override
 	public long getPos() throws IOException {

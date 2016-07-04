@@ -1,15 +1,27 @@
 package org.apache.hadoop.fs.sftp;
 
+import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import org.apache.commons.codec.binary.Hex;
+import org.apache.commons.io.IOUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.BufferedFSInputStream;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -17,10 +29,13 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.io.compress.DecompressorStream;
+import org.apache.hadoop.io.compress.zlib.ZlibDecompressor;
+import org.apache.hadoop.mapred.LineRecordReader.LineReader;
 import org.apache.hadoop.util.Progressable;
 
 import ch.ethz.ssh2.Connection;
-import ch.ethz.ssh2.KnownHosts;
 import ch.ethz.ssh2.SFTPException;
 import ch.ethz.ssh2.SFTPv3Client;
 import ch.ethz.ssh2.SFTPv3DirectoryEntry;
@@ -30,16 +45,19 @@ import ch.ethz.ssh2.ServerHostKeyVerifier;
 import ch.ethz.ssh2.sftp.ErrorCodes;
 
 /**
- * Based on implementation posted on Hadoop JIRA.
- * Using Ganymede SSH lib for improved performance.
+ * Based on implementation posted on Hadoop JIRA. Using Ganymede SSH lib for
+ * improved performance.
+ * 
  * @see https://issues.apache.org/jira/browse/HADOOP-5732
  * @author wnagele
  */
 public class SFTPFileSystem extends FileSystem {
+	
+	public static final Log LOG = LogFactory.getLog(SFTPFileSystem.class);
+	  
 	private final int MAX_BUFFER_SIZE = 32768;
 	private final int DEFAULT_PORT = 22;
 	private final String DEFAULT_KEY_FILE = "${user.home}/.ssh/id_rsa";
-	private final String DEFAULT_KNOWNHOSTS_FILE = "${user.home}/.ssh/known_hosts";
 
 	private final String PARAM_BUFFER_SIZE = "io.file.buffer.size";
 	private final String PARAM_HOST = "fs.sftp.host";
@@ -48,20 +66,43 @@ public class SFTPFileSystem extends FileSystem {
 	private final String PARAM_PASSWORD = "fs.sftp.password";
 	private final String PARAM_KEY_FILE = "fs.sftp.key.file";
 	private final String PARAM_KEY_PASSWORD = "fs.sftp.key.password";
-	private final String PARAM_KNOWNHOSTS = "fs.sftp.knownhosts";
 
 	private Configuration conf;
 	private URI uri;
-	private SFTPv3Client client;
+	private SFTPv3ClientWrapper client;
 	private Connection connection;
 
+	
+	public static void main(String[] args) throws URISyntaxException, IOException, InterruptedException {
+		String url = "sftp://mtnsasftp:Tue2015sa@203.199.178.218:22/Processed/20151121-Downloads.csv";
+		URI uri = new URI(url);
+		SFTPFileSystem fs = new SFTPFileSystem();
+		fs.initialize(uri, new Configuration());
+		FSDataInputStream in = fs.open(new Path(url));
+		byte[] buffer = new byte[32768];
+		System.out.println(in.read(0, buffer, 0, 32768));
+		System.out.println(in.read(32768, buffer, 0, 32768));
+		//IOUtils.copy(in,out);
+		in.close();
+		url = "sftp://mtnsasftp:Tue2015sa@203.199.178.218:22/Processed/20151121-Downloads.csv";
+		fs.getFileStatus(new Path(url));
+		in = fs.open(new Path(url));
+		buffer = new byte[32768];
+		System.out.println(in.read(0, buffer, 0, 32768));
+		System.out.println(in.read(32768, buffer, 0, 32768));
+		//IOUtils.copy(in,out);
+		in.close();
+	}
+	
+	
 	@Override
 	public void initialize(URI uri, Configuration conf) throws IOException {
 		Logger.getLogger("ch.ethz.ssh2").setLevel(Level.OFF);
 
 		this.uri = uri;
 		this.conf = conf;
-
+		
+		
 		// If no explicit buffer was set use the maximum.
 		// Also limit the buffer to the maximum value.
 		int bufferSize = conf.getInt(PARAM_BUFFER_SIZE, -1);
@@ -100,67 +141,58 @@ public class SFTPFileSystem extends FileSystem {
 		}
 	}
 
-	/**
-	 * The current implementation of @see KnownHosts does not support
-	 * known_hosts entries that use a non-default port.
-	 * If we encounter such an entry we wrap it into the known_hosts
-	 * format before looking it up.
-	 */
-	private class PortAwareKnownHosts extends KnownHosts {
-		public PortAwareKnownHosts(File knownHosts) throws IOException {
-			super(knownHosts);
-		}
-
-		public int verifyHostkey(String hostname, int port, String serverHostKeyAlgorithm, byte[] serverHostKey) throws IOException {
-			if (port != 22) {
-				StringBuffer sb = new StringBuffer();
-				sb.append('[');
-				sb.append(hostname);
-				sb.append("]:");
-				sb.append(port);
-				hostname = sb.toString();
-			}
-
-			return super.verifyHostkey(hostname, serverHostKeyAlgorithm, serverHostKey);
+	protected void connect() throws IOException {
+		
+		if (client == null || !client.isConnected()) {
+			connection = getConnection();
+			LOG.info("Creating client");
+			client = new SFTPv3ClientWrapper(connection);
+			//client.setRequestParallelism(1);
 		}
 	}
+	
+	protected Connection getConnection() throws IOException {
+		String host = conf.get(PARAM_HOST);
+		int port = conf.getInt(PARAM_PORT, DEFAULT_PORT);
+		String key = conf.get(PARAM_KEY_FILE, DEFAULT_KEY_FILE);
+		String keyPassword = conf.get(PARAM_KEY_PASSWORD);
+		String user = conf.get(PARAM_USER);
+		String password = conf.get(PARAM_PASSWORD);
 
-	protected void connect() throws IOException {
-		if (client == null || !client.isConnected()) {
-			String host = conf.get(PARAM_HOST);
-			int port = conf.getInt(PARAM_PORT, DEFAULT_PORT);
-			String key = conf.get(PARAM_KEY_FILE, DEFAULT_KEY_FILE);
-			String keyPassword = conf.get(PARAM_KEY_PASSWORD);
-			String user = conf.get(PARAM_USER);
-			String password = conf.get(PARAM_PASSWORD);
-			String knownHostsFile = conf.get(PARAM_KNOWNHOSTS, DEFAULT_KNOWNHOSTS_FILE);
+		Connection connection = new Connection(host, port);
 
-			final PortAwareKnownHosts knownHosts = new PortAwareKnownHosts(new File(knownHostsFile));
+		connection.connect(new ServerHostKeyVerifier() {
+			@Override
+			public boolean verifyServerHostKey(String hostname, int port,
+					String serverHostKeyAlgorithm, byte[] serverHostKey)
+					throws Exception {
 
-			connection = new Connection(host, port);
-			connection.connect(new ServerHostKeyVerifier() {
-				@Override
-				public boolean verifyServerHostKey(String hostname, int port, String serverHostKeyAlgorithm, byte[] serverHostKey) throws Exception {
-					if (knownHosts.verifyHostkey(hostname, port, serverHostKeyAlgorithm, serverHostKey) == KnownHosts.HOSTKEY_IS_OK)
-						return true;
-					throw new IOException("Couldn't verify host key for " + hostname);
-				}
-			});
+				return true;
+			}
+		});
 
-			if (password != null)
-				connection.authenticateWithPassword(user, password);
-			else
-				connection.authenticateWithPublicKey(user, new File(key), keyPassword);
-
-			client = new SFTPv3Client(connection);
-		}
+		if (password != null)
+			connection.authenticateWithPassword(user, password);
+		else
+			connection.authenticateWithPublicKey(user, new File(key),
+					keyPassword);
+		return connection;		
+	}
+	
+	protected SFTPv3ClientWrapper getClient() throws IOException {
+		LOG.info("Creating specific client");
+		SFTPv3ClientWrapper client = new SFTPv3ClientWrapper(getConnection());
+		client.setRequestParallelism(1);
+		return client;
 	}
 
 	@Override
 	public void close() throws IOException {
 		super.close();
-		if (client != null && client.isConnected())
+		if (client != null && client.isConnected()) {
+			LOG.info("Closing client");
 			client.close();
+		}
 		if (connection != null)
 			connection.close();
 	}
@@ -181,23 +213,33 @@ public class SFTPFileSystem extends FileSystem {
 		if (getFileStatus(file).isDir())
 			throw new IOException("Path " + file + " is a directory.");
 
+		LOG.info("Opening file: " + file.getName());
+		
 		String path = file.toUri().getPath();
-		SFTPv3FileHandle handle = client.openFileRO(path);
+		SFTPv3FileHandle handle = getClient().openFileRO(path);
 		SFTPInputStream is = new SFTPInputStream(handle, statistics);
 		return is;
 	}
 
 	@Override
-	public FSDataOutputStream create(Path file, FsPermission permission, boolean overwrite, int bufferSize, short replication, long blockSize, Progressable progress) throws IOException {
-		return createInternal(file, permission, overwrite, SFTPv3Client.SSH_FXF_CREAT | SFTPv3Client.SSH_FXF_WRITE | SFTPv3Client.SSH_FXF_TRUNC);
+	public FSDataOutputStream create(Path file, FsPermission permission,
+			boolean overwrite, int bufferSize, short replication,
+			long blockSize, Progressable progress) throws IOException {
+		return createInternal(file, permission, overwrite,
+				SFTPv3Client.SSH_FXF_CREAT | SFTPv3Client.SSH_FXF_WRITE
+						| SFTPv3Client.SSH_FXF_TRUNC);
 	}
 
 	@Override
-	public FSDataOutputStream append(Path file, int bufferSize, Progressable progress) throws IOException {
-		return createInternal(file, null, true, SFTPv3Client.SSH_FXF_WRITE | SFTPv3Client.SSH_FXF_APPEND);
+	public FSDataOutputStream append(Path file, int bufferSize,
+			Progressable progress) throws IOException {
+		return createInternal(file, null, true, SFTPv3Client.SSH_FXF_WRITE
+				| SFTPv3Client.SSH_FXF_APPEND);
 	}
 
-	protected FSDataOutputStream createInternal(Path file, FsPermission permission, boolean overwrite, int flags) throws IOException {
+	protected FSDataOutputStream createInternal(Path file,
+			FsPermission permission, boolean overwrite, int flags)
+			throws IOException {
 		if (exists(file) && !overwrite)
 			throw new IOException("File " + file + " exists");
 
@@ -212,13 +254,14 @@ public class SFTPFileSystem extends FileSystem {
 		}
 
 		String path = file.toUri().getPath();
-		SFTPv3FileHandle handle = client.openFile(path, flags, attrs);
+		SFTPv3FileHandle handle = getClient().openFile(path, flags, attrs);
 		SFTPOutputStream os = new SFTPOutputStream(handle, statistics);
-		return new FSDataOutputStream(os, statistics);
+		return new FSDataOutputStream(new BufferedOutputStream(os), statistics);
 	}
 
 	@Override
-	public boolean mkdirs(Path file, FsPermission permission) throws IOException {
+	public boolean mkdirs(Path file, FsPermission permission)
+			throws IOException {
 		if (!exists(file)) {
 			Path parent = file.getParent();
 			if (parent == null || mkdirs(parent, permission)) {
@@ -272,14 +315,22 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
-	public FileStatus getFileStatus(Path file) throws IOException {
-		if (file.getParent() == null)
-			return new FileStatus(-1, true, -1, -1, -1, new Path("/").makeQualified(this));
-
+	public FileStatus getFileStatus(Path file) throws IOException {		
+		file = file.makeQualified(this);
+		if (file.getParent() == null){
+			LOG.info("getFileStatus1 ifnull- " + file.toUri().toString() + " len=0");
+			return new FileStatus(0, true, 1, getDefaultBlockSize(), 0,
+					new Path("/").makeQualified(this));
+		}
 		try {
 			String path = file.toUri().getPath();
+			LOG.info("getFileStatus2 - " + file.toUri().toString());
 			SFTPv3FileAttributes attrs = client.stat(path);
-			return getFileStatus(attrs, file);
+			LOG.info("getFileStatus3 - " + file.toUri().toString() + " len=" + attrs.size);
+			//LOG.info("getFileStatus2 - filesystem=" + file.getFileSystem(conf).toString());
+			FileStatus status = getFileStatus(attrs, file);
+			return status;
+					
 		} catch (SFTPException e) {
 			if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
 				throw new FileNotFoundException(file.toString());
@@ -287,29 +338,54 @@ public class SFTPFileSystem extends FileSystem {
 		}
 	}
 
-	private FileStatus getFileStatus(SFTPv3FileAttributes attrs, Path file) throws IOException {
-		long length = attrs.size;
+	private FileStatus getFileStatus(SFTPv3FileAttributes attrs, Path file)
+			throws IOException {
+		long length = 0;
+		if (attrs.size != null)
+			length = attrs.size;
 		boolean isDir = attrs.isDirectory();
-		long modTime = new Integer(attrs.mtime).longValue() * 1000L;
-		long accessTime = new Integer(attrs.atime).longValue() * 1000L;
-		FsPermission permission = new FsPermission(new Integer(attrs.permissions).shortValue());
-		String user = Integer.toString(attrs.uid);
-		String group = Integer.toString(attrs.gid);
-		return new FileStatus(length, isDir, -1, -1, modTime, accessTime, permission, user, group, file);
+		long modTime = 0;
+		if (attrs.mtime != null)
+			modTime = new Integer(attrs.mtime).longValue() * 1000L;
+		long accessTime = 0;
+		if (attrs.atime != null)
+			accessTime = new Integer(attrs.atime).longValue() * 1000L;
+		FsPermission permission = null;
+		if (attrs.permissions != null)
+			permission = new FsPermission(new Integer(
+				attrs.permissions).shortValue());
+		String user = null; 
+		if (attrs.uid != null)
+			user = Integer.toString(attrs.uid);
+		String group  = null; 
+		if (attrs.gid != null)
+			group = Integer.toString(attrs.gid);
+		return new FileStatus(length, isDir, 1, getDefaultBlockSize(), modTime,
+				accessTime, permission, user, group, file);
 	}
 
 	@Override
 	public FileStatus[] listStatus(Path path) throws IOException {
 		FileStatus fileStat = getFileStatus(path);
-		if (!fileStat.isDir())
+		if (!fileStat.isDir()) {
+			LOG.info("listStatus1 - filesystem=" + fileStat.getPath().getFileSystem(conf).toString());
 			return new FileStatus[] { fileStat };
+		}
 
-		List<SFTPv3DirectoryEntry> sftpFiles = client.ls(path.toUri().getPath());
-		ArrayList<FileStatus> fileStats = new ArrayList<FileStatus>(sftpFiles.size());
+		String strPath = path.toUri().getPath();
+
+		List<SFTPv3DirectoryEntry> sftpFiles = client.ls(strPath);
+		ArrayList<FileStatus> fileStats = new ArrayList<FileStatus>(
+				sftpFiles.size());
 		for (SFTPv3DirectoryEntry sftpFile : sftpFiles) {
 			String filename = sftpFile.filename;
-			if (!"..".equals(filename) && !".".equals(filename))
-				fileStats.add(getFileStatus(sftpFile.attributes, new Path(path, filename).makeQualified(this)));
+			if (!"..".equals(filename) && !".".equals(filename)){
+				Path file = new Path(path,
+						filename).makeQualified(this);
+				fileStats.add(getFileStatus(sftpFile.attributes, file));
+				LOG.info("listStatus2 - file=" + file.toUri().toString());
+				LOG.info("listStatus2 - filesystem=" + file.getFileSystem(conf).toString());
+			}
 		}
 		return fileStats.toArray(new FileStatus[0]);
 	}
@@ -334,10 +410,38 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
-	public void setWorkingDirectory(Path workDir) {}
+	public void setWorkingDirectory(Path workDir) {
+	}
 
 	@Override
 	public Path getWorkingDirectory() {
 		return null;
 	}
+
+	@Override
+	public long getDefaultBlockSize() {
+		return getConf().getLong("fs.sftp.block.size", 64 * 1024 * 1024);
+	}
+
+	public BlockLocation[] getFileBlockLocations(FileStatus file, long start,
+			long len) throws IOException {
+		LOG.info("getFileBlockLocations - start = " + start + " , len = " + len);
+		LOG.info("getFileBlockLocations: path=" + file.getPath().toUri().toString() + " len=" + file.getLen() + " blocksize=" + file.getBlockSize() + " isdir=" + file.isDir());
+		return super.getFileBlockLocations(file, start, len);
+	}
+
+	static class SFTPv3ClientWrapper extends SFTPv3Client {
+
+		protected final Connection connection;
+		
+		public SFTPv3ClientWrapper(Connection connection) throws IOException {
+			super(connection);
+			this.connection = connection;
+		}
+		
+		public Connection getConnection() {
+			return this.connection;
+		}
+	}
+	
 }
