@@ -71,30 +71,7 @@ public class SFTPFileSystem extends FileSystem {
 	private Configuration conf;
 	private URI uri;
 	private SFTPv3ClientWrapper client;
-	private Connection connection;
-
-	
-	public static void main(String[] args) throws URISyntaxException, IOException, InterruptedException {
-		String url = "sftp://mtnsasftp:Tue2015sa@203.199.178.218:22/Processed/20151121-Downloads.csv";
-		URI uri = new URI(url);
-		SFTPFileSystem fs = new SFTPFileSystem();
-		fs.initialize(uri, new Configuration());
-		FSDataInputStream in = fs.open(new Path(url));
-		byte[] buffer = new byte[32768];
-		System.out.println(in.read(0, buffer, 0, 32768));
-		System.out.println(in.read(32768, buffer, 0, 32768));
-		//IOUtils.copy(in,out);
-		in.close();
-		url = "sftp://mtnsasftp:Tue2015sa@203.199.178.218:22/Processed/20151121-Downloads.csv";
-		fs.getFileStatus(new Path(url));
-		in = fs.open(new Path(url));
-		buffer = new byte[32768];
-		System.out.println(in.read(0, buffer, 0, 32768));
-		System.out.println(in.read(32768, buffer, 0, 32768));
-		//IOUtils.copy(in,out);
-		in.close();
-	}
-	
+	private Connection connection;	
 	
 	@Override
 	public void initialize(URI uri, Configuration conf) throws IOException {
@@ -102,7 +79,11 @@ public class SFTPFileSystem extends FileSystem {
 
 		this.uri = uri;
 		this.conf = conf;
-		
+
+		conf.unset(PARAM_HOST);
+		conf.unset(PARAM_PORT);
+		conf.unset(PARAM_USER);
+		conf.unset(PARAM_PASSWORD);
 		
 		// If no explicit buffer was set use the maximum.
 		// Also limit the buffer to the maximum value.
@@ -341,19 +322,27 @@ public class SFTPFileSystem extends FileSystem {
 			return new FileStatus(0, true, 1, getDefaultBlockSize(), 0,
 					new Path("/").makeQualified(this));
 		}
-		try {
-			String path = file.toUri().getPath();
-			LOG.info("getFileStatus2 - " + file.toUri().toString());
-			SFTPv3FileAttributes attrs = client.stat(path);
-			LOG.info("getFileStatus3 - " + file.toUri().toString() + " len=" + attrs.size);
-			//LOG.info("getFileStatus2 - filesystem=" + file.getFileSystem(conf).toString());
-			FileStatus status = getFileStatus(attrs, file);
-			return status;
-					
-		} catch (SFTPException e) {
-			if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
-				throw new FileNotFoundException(file.toString());
-			throw e;
+		for (int attempt = 0; true; attempt++) {
+			try {
+				String path = file.toUri().getPath();
+				LOG.info("getFileStatus2 - " + file.toUri().toString());
+				SFTPv3FileAttributes attrs = client.stat(path);
+				LOG.info("getFileStatus3 - " + file.toUri().toString() + " len=" + attrs.size);
+				//LOG.info("getFileStatus2 - filesystem=" + file.getFileSystem(conf).toString());
+				FileStatus status = getFileStatus(attrs, file);
+				return status;
+						
+			} catch (SFTPException e) {
+				LOG.info("caught exception, retrying: ", e);
+				if (attempt >3) {
+					if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
+						throw new FileNotFoundException(file.toString());
+					throw e;
+				}
+			}
+			try {
+				Thread.sleep(500);
+			} catch (InterruptedException e) { }
 		}
 	}
 
