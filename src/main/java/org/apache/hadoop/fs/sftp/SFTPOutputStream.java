@@ -29,16 +29,17 @@ public class SFTPOutputStream extends OutputStream {
 		SFTPv3FileAttributes attrs = client.fstat(handle);
 		id = attrs.uid;
 		pos += attrs.size;
+		LOG.debug("created output stream(" + id + ")");
 	}
 
 	@Override
 	public void close() throws IOException {
 		LOG.debug("closing output stream(" + id + ")");
 		super.close();
-		//client.closeFile(handle);
+		client.closeFile(handle);
 		client.close();
 		if (client instanceof SFTPv3ClientWrapper) {
-			LOG.info("Closing specific connection");
+			LOG.debug("Closing specific connection");
 			((SFTPv3ClientWrapper)client).getConnection().close();
 		}
 	}
