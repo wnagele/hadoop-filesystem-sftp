@@ -75,7 +75,7 @@ public class SFTPFileSystem extends FileSystem {
 
 	
 	public static void main(String[] args) throws URISyntaxException, IOException, InterruptedException {
-		String url = "sftp://mtnsasftp:Tue2015sa@203.199.178.218:22/Processed/20151121-Downloads.csv";
+		String url = "sftp:/a:b@c:22/Processed/20151121-Downloads.csv";
 		URI uri = new URI(url);
 		SFTPFileSystem fs = new SFTPFileSystem();
 		fs.initialize(uri, new Configuration());
@@ -85,7 +85,7 @@ public class SFTPFileSystem extends FileSystem {
 		System.out.println(in.read(32768, buffer, 0, 32768));
 		//IOUtils.copy(in,out);
 		in.close();
-		url = "sftp://mtnsasftp:Tue2015sa@203.199.178.218:22/Processed/20151121-Downloads.csv";
+		url = "sftp://a:b@c:22/Processed/20151121-Downloads.csv";
 		fs.getFileStatus(new Path(url));
 		in = fs.open(new Path(url));
 		buffer = new byte[32768];
