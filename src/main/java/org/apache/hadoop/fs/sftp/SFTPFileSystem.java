@@ -95,14 +95,17 @@ public class SFTPFileSystem extends FileSystem {
 		in.close();
 	}
 	
-	
 	@Override
 	public void initialize(URI uri, Configuration conf) throws IOException {
 		Logger.getLogger("ch.ethz.ssh2").setLevel(Level.OFF);
 
 		this.uri = uri;
 		this.conf = conf;
-		
+
+		conf.unset(PARAM_HOST);
+		conf.unset(PARAM_PORT);
+		conf.unset(PARAM_USER);
+		conf.unset(PARAM_PASSWORD);
 		
 		// If no explicit buffer was set use the maximum.
 		// Also limit the buffer to the maximum value.
@@ -341,19 +344,27 @@ public class SFTPFileSystem extends FileSystem {
 			return new FileStatus(0, true, 1, getDefaultBlockSize(), 0,
 					new Path("/").makeQualified(this));
 		}
-		try {
-			String path = file.toUri().getPath();
-			LOG.info("getFileStatus2 - " + file.toUri().toString());
-			SFTPv3FileAttributes attrs = client.stat(path);
-			LOG.info("getFileStatus3 - " + file.toUri().toString() + " len=" + attrs.size);
-			//LOG.info("getFileStatus2 - filesystem=" + file.getFileSystem(conf).toString());
-			FileStatus status = getFileStatus(attrs, file);
-			return status;
-					
-		} catch (SFTPException e) {
-			if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
-				throw new FileNotFoundException(file.toString());
-			throw e;
+		for (int attempt = 0; true; attempt++) {
+			try {
+				String path = file.toUri().getPath();
+				LOG.info("getFileStatus2 - " + file.toUri().toString());
+				SFTPv3FileAttributes attrs = client.stat(path);
+				LOG.info("getFileStatus3 - " + file.toUri().toString() + " len=" + attrs.size);
+				//LOG.info("getFileStatus2 - filesystem=" + file.getFileSystem(conf).toString());
+				FileStatus status = getFileStatus(attrs, file);
+				return status;
+						
+			} catch (SFTPException e) {
+				LOG.info("caught exception, retrying: ", e);
+				if (attempt >3) {
+					if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
+						throw new FileNotFoundException(file.toString());
+					throw e;
+				}
+			}
+			try {
+				Thread.sleep(500);
+			} catch (InterruptedException e) { }
 		}
 	}
 
