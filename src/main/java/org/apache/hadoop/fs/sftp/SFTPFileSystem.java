@@ -1,14 +1,9 @@
 package org.apache.hadoop.fs.sftp;
 
 import java.io.BufferedOutputStream;
-import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
@@ -16,8 +11,6 @@ import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import org.apache.commons.codec.binary.Hex;
-import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -29,20 +22,16 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.io.Text;
-import org.apache.hadoop.io.compress.DecompressorStream;
-import org.apache.hadoop.io.compress.zlib.ZlibDecompressor;
-import org.apache.hadoop.mapred.LineRecordReader.LineReader;
 import org.apache.hadoop.util.Progressable;
 
 import ch.ethz.ssh2.Connection;
+import ch.ethz.ssh2.InteractiveCallback;
 import ch.ethz.ssh2.SFTPException;
 import ch.ethz.ssh2.SFTPv3Client;
 import ch.ethz.ssh2.SFTPv3DirectoryEntry;
 import ch.ethz.ssh2.SFTPv3FileAttributes;
 import ch.ethz.ssh2.SFTPv3FileHandle;
 import ch.ethz.ssh2.ServerHostKeyVerifier;
-import ch.ethz.ssh2.InteractiveCallback;
 import ch.ethz.ssh2.sftp.ErrorCodes;
 
 /**
@@ -67,11 +56,16 @@ public class SFTPFileSystem extends FileSystem {
 	private final String PARAM_PASSWORD = "fs.sftp.password";
 	private final String PARAM_KEY_FILE = "fs.sftp.key.file";
 	private final String PARAM_KEY_PASSWORD = "fs.sftp.key.password";
+	private final String PARAM_MAX_ATTEMPTS = "fs.sftp.maxattempts";
+	private final String PARAM_RETRY_SLEEP = "fs.sftp.retrysleep";
 
 	private Configuration conf;
 	private URI uri;
 	private SFTPv3ClientWrapper client;
 	private Connection connection;
+
+	private int maxAttempts = 5;
+	private int retrySleep = 500; 
 
 	
 	public static void main(String[] args) throws URISyntaxException, IOException, InterruptedException {
@@ -101,6 +95,9 @@ public class SFTPFileSystem extends FileSystem {
 
 		this.uri = uri;
 		this.conf = conf;
+
+		maxAttempts = conf.getInt(PARAM_MAX_ATTEMPTS, maxAttempts);
+		retrySleep = conf.getInt(PARAM_RETRY_SLEEP, retrySleep);
 
 		conf.unset(PARAM_HOST);
 		conf.unset(PARAM_PORT);
@@ -298,8 +295,21 @@ public class SFTPFileSystem extends FileSystem {
 	public boolean rename(Path src, Path dst) throws IOException {
 		String oldPath = src.toUri().getPath();
 		String newPath = dst.toUri().getPath();
-		client.mv(oldPath, newPath);
-		return true;
+		
+		for (int attempt = 1; true; attempt++) {
+			try {
+				client.mv(oldPath, newPath);	
+				return true;					
+			} catch (SFTPException e) {
+				LOG.info("caught exception, retrying: ", e);
+				if (attempt >= maxAttempts) {
+					throw e;
+				}
+			}
+			try {
+				Thread.sleep(retrySleep);
+			} catch (InterruptedException e) { }
+		}		
 	}
 
 	@Override
@@ -344,7 +354,7 @@ public class SFTPFileSystem extends FileSystem {
 			return new FileStatus(0, true, 1, getDefaultBlockSize(), 0,
 					new Path("/").makeQualified(this));
 		}
-		for (int attempt = 0; true; attempt++) {
+		for (int attempt = 1; true; attempt++) {
 			try {
 				String path = file.toUri().getPath();
 				LOG.info("getFileStatus2 - " + file.toUri().toString());
@@ -356,14 +366,14 @@ public class SFTPFileSystem extends FileSystem {
 						
 			} catch (SFTPException e) {
 				LOG.info("caught exception, retrying: ", e);
-				if (attempt >3) {
+				if (attempt >= maxAttempts) {
 					if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
 						throw new FileNotFoundException(file.toString());
 					throw e;
 				}
 			}
 			try {
-				Thread.sleep(500);
+				Thread.sleep(retrySleep);
 			} catch (InterruptedException e) { }
 		}
 	}
