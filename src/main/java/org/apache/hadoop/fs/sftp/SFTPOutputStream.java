@@ -29,37 +29,37 @@ public class SFTPOutputStream extends OutputStream {
 		SFTPv3FileAttributes attrs = client.fstat(handle);
 		id = attrs.uid;
 		pos += attrs.size;
-		LOG.debug("created output stream(" + id + ")");
+		LOG.info("created output stream (" + id + ")");
 	}
 
 	@Override
 	public void close() throws IOException {
-		LOG.debug("closing output stream(" + id + ")");
+		LOG.info("closing output stream (" + id + ")");
 		super.close();
 		client.closeFile(handle);
 		client.close();
 		if (client instanceof SFTPv3ClientWrapper) {
-			LOG.debug("Closing specific connection");
+			LOG.info("closing connection for output stream (" + id + ")");
 			((SFTPv3ClientWrapper)client).getConnection().close();
 		}
 	}
 
 	@Override
 	public void write(byte[] b, int off, int len) throws IOException {
-		LOG.debug("writing to stream(" + id + ") - len=" + len);
+		LOG.debug("writing to stream (" + id + ") - len=" + len);
 		client.write(handle, pos, b, off, len);
 		pos += len;
-		LOG.debug("writen to stream(" + id + ") - pos=" + pos);
+		LOG.debug("writen to stream (" + id + ") - pos=" + pos);
 		if (stats != null)
 			stats.incrementBytesWritten(len);
 	}
 
 	@Override
 	public void write(int b) throws IOException {
-		LOG.debug("writing int to stream(" + id + ") - b=" + b);
+		LOG.debug("writing int to stream (" + id + ") - b=" + b);
 		client.write(handle, pos, new byte[] { (byte)b }, 0, 1);
         pos++;
-		LOG.debug("writen to stream(" + id + ") - pos=" + pos);
+		LOG.debug("writen to stream (" + id + ") - pos=" + pos);
 		if (stats != null)
 			stats.incrementBytesWritten(1);
 	}

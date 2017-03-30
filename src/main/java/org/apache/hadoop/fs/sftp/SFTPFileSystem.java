@@ -142,18 +142,23 @@ public class SFTPFileSystem extends FileSystem {
 		}
 	}
 
-	protected void connect() throws IOException {
-		
+	protected void connect() throws IOException {		
 		if (client == null || !client.isConnected()) {
-			
-			connection = getConnection();
+			closeClient();
+			connection = createConnection();
 			LOG.info("Creating client");
 			client = new SFTPv3ClientWrapper(connection);
 			//client.setRequestParallelism(1);
 		}
 	}
 	
-	protected Connection getConnection() throws IOException {
+	protected SFTPv3ClientWrapper getClient() throws IOException {
+		connect();
+		return client;		
+	}
+	
+	protected Connection createConnection() throws IOException {
+		LOG.info("Creating connection");
 		String host = conf.get(PARAM_HOST);
 		int port = conf.getInt(PARAM_PORT, DEFAULT_PORT);
 		String key = conf.get(PARAM_KEY_FILE, DEFAULT_KEY_FILE);
@@ -198,9 +203,9 @@ public class SFTPFileSystem extends FileSystem {
 		return connection;		
 	}
 	
-	protected SFTPv3ClientWrapper getClient() throws IOException {
-		LOG.info("Creating specific client");
-		SFTPv3ClientWrapper client = new SFTPv3ClientWrapper(getConnection());
+	protected SFTPv3ClientWrapper createClient() throws IOException {
+		LOG.info("Creating client for file stream");
+		SFTPv3ClientWrapper client = new SFTPv3ClientWrapper(createConnection());
 		client.setRequestParallelism(1);
 		return client;
 	}
@@ -208,8 +213,12 @@ public class SFTPFileSystem extends FileSystem {
 	@Override
 	public void close() throws IOException {
 		super.close();
-		if (client != null && client.isConnected()) {
-			LOG.info("Closing client");
+		LOG.info("Closing client");
+		closeClient();
+	}
+
+	private void closeClient() throws IOException {
+		if (client != null) {
 			client.close();
 		}
 		if (connection != null)
@@ -229,13 +238,13 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	private SFTPInputStream openInternal(Path file) throws IOException {
-		if (getFileStatus(file).isDir())
+		if (getFileStatus(file, true).isDir())
 			throw new IOException("Path " + file + " is a directory.");
 
-		LOG.info("Opening file: " + file.getName());
+		LOG.info("Opening file for read: " + file.toString());
 		
 		String path = file.toUri().getPath();
-		SFTPv3FileHandle handle = getClient().openFileRO(path);
+		SFTPv3FileHandle handle = createClient().openFileRO(path);
 		SFTPInputStream is = new SFTPInputStream(handle, statistics);
 		return is;
 	}
@@ -259,11 +268,13 @@ public class SFTPFileSystem extends FileSystem {
 	protected FSDataOutputStream createInternal(Path file,
 			FsPermission permission, boolean overwrite, int flags)
 			throws IOException {
-		if (exists(file) && !overwrite)
+		if (exists(file, false) && !overwrite)
 			throw new IOException("File " + file + " exists");
 
+		LOG.info("Opening file for write: " + file.toString());
+		
 		Path parent = file.getParent();
-		if (!exists(parent))
+		if (!exists(parent, true))
 			mkdirs(parent);
 
 		SFTPv3FileAttributes attrs = null;
@@ -273,7 +284,7 @@ public class SFTPFileSystem extends FileSystem {
 		}
 
 		String path = file.toUri().getPath();
-		SFTPv3FileHandle handle = getClient().openFile(path, flags, attrs);
+		SFTPv3FileHandle handle = createClient().openFile(path, flags, attrs);
 		SFTPOutputStream os = new SFTPOutputStream(handle, statistics);
 		return new FSDataOutputStream(new BufferedOutputStream(os), statistics);
 	}
@@ -281,11 +292,12 @@ public class SFTPFileSystem extends FileSystem {
 	@Override
 	public boolean mkdirs(Path file, FsPermission permission)
 			throws IOException {
-		if (!exists(file)) {
+		LOG.info("creating dir: " + file.toString());
+		if (!exists(file, false)) {
 			Path parent = file.getParent();
 			if (parent == null || mkdirs(parent, permission)) {
 				String path = file.toUri().getPath();
-				client.mkdir(path, permission.toShort());
+				getClient().mkdir(path, permission.toShort());
 			}
 		}
 		return true;
@@ -296,15 +308,17 @@ public class SFTPFileSystem extends FileSystem {
 		String oldPath = src.toUri().getPath();
 		String newPath = dst.toUri().getPath();
 		
+		LOG.info("moving file: " + oldPath + " -> " + newPath);
+		
 		for (int attempt = 1; true; attempt++) {
 			try {
-				client.mv(oldPath, newPath);	
-				return true;					
+				getClient().mv(oldPath, newPath);	
+				return true;		
 			} catch (SFTPException e) {
-				LOG.info("caught exception, retrying: ", e);
 				if (attempt >= maxAttempts) {
 					throw e;
-				}
+				} else
+					LOG.debug("caught exception in attempt " + attempt + ", retrying: ", e);
 			}
 			try {
 				Thread.sleep(retrySleep);
@@ -315,8 +329,9 @@ public class SFTPFileSystem extends FileSystem {
 	@Override
 	public boolean delete(Path file, boolean recursive) throws IOException {
 		String path = file.toUri().getPath();
-		if (!getFileStatus(file).isDir()) {
-			client.rm(path);
+		LOG.info("deleting file: " + path);
+		if (!getFileStatus(file, false).isDir()) {
+			getClient().rm(path);
 			return true;
 		}
 
@@ -327,7 +342,7 @@ public class SFTPFileSystem extends FileSystem {
 		for (FileStatus dirEntry : dirEntries)
 			delete(dirEntry.getPath(), recursive);
 
-		client.rmdir(path);
+		getClient().rmdir(path);
 		return true;
 	}
 
@@ -340,37 +355,39 @@ public class SFTPFileSystem extends FileSystem {
 	public void setTimes(Path file, long mtime, long atime) throws IOException {
 		FileStatus status = getFileStatus(file);
 		String path = status.getPath().toUri().getPath();
-		SFTPv3FileAttributes attrs = client.stat(path);
+		SFTPv3FileAttributes attrs = getClient().stat(path);
 		attrs.mtime = new Long(mtime / 1000L).intValue();
 		attrs.atime = new Long(atime / 1000L).intValue();
-		client.setstat(path, attrs);
+		getClient().setstat(path, attrs);
 	}
 
 	@Override
 	public FileStatus getFileStatus(Path file) throws IOException {		
+		return getFileStatus(file, true);
+	}
+
+	private FileStatus getFileStatus(Path file, boolean retryIfNotExists) throws IOException {		
 		file = file.makeQualified(this);
 		if (file.getParent() == null){
-			LOG.info("getFileStatus1 ifnull- " + file.toUri().toString() + " len=0");
 			return new FileStatus(0, true, 1, getDefaultBlockSize(), 0,
 					new Path("/").makeQualified(this));
 		}
 		for (int attempt = 1; true; attempt++) {
 			try {
 				String path = file.toUri().getPath();
-				LOG.info("getFileStatus2 - " + file.toUri().toString());
-				SFTPv3FileAttributes attrs = client.stat(path);
-				LOG.info("getFileStatus3 - " + file.toUri().toString() + " len=" + attrs.size);
-				//LOG.info("getFileStatus2 - filesystem=" + file.getFileSystem(conf).toString());
+				LOG.info("getFileStatus - calling for stats - " + file.toUri().toString());
+				SFTPv3FileAttributes attrs = getClient().stat(path);
+				LOG.info("getFileStatus - getting file status from attributes" + file.toUri().toString() + " len=" + attrs.size);
 				FileStatus status = getFileStatus(attrs, file);
 				return status;
 						
 			} catch (SFTPException e) {
-				LOG.info("caught exception, retrying: ", e);
-				if (attempt >= maxAttempts) {
+				if (!retryIfNotExists || attempt >= maxAttempts) {
 					if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
 						throw new FileNotFoundException(file.toString());
 					throw e;
-				}
+				} else
+					LOG.debug("caught exception in attempt " + attempt + ", retrying: ", e);
 			}
 			try {
 				Thread.sleep(retrySleep);
@@ -408,13 +425,12 @@ public class SFTPFileSystem extends FileSystem {
 	public FileStatus[] listStatus(Path path) throws IOException {
 		FileStatus fileStat = getFileStatus(path);
 		if (!fileStat.isDir()) {
-			LOG.info("listStatus1 - filesystem=" + fileStat.getPath().getFileSystem(conf).toString());
 			return new FileStatus[] { fileStat };
 		}
 
 		String strPath = path.toUri().getPath();
 
-		List<SFTPv3DirectoryEntry> sftpFiles = client.ls(strPath);
+		List<SFTPv3DirectoryEntry> sftpFiles = getClient().ls(strPath);
 		ArrayList<FileStatus> fileStats = new ArrayList<FileStatus>(
 				sftpFiles.size());
 		for (SFTPv3DirectoryEntry sftpFile : sftpFiles) {
@@ -423,8 +439,6 @@ public class SFTPFileSystem extends FileSystem {
 				Path file = new Path(path,
 						filename).makeQualified(this);
 				fileStats.add(getFileStatus(sftpFile.attributes, file));
-				LOG.info("listStatus2 - file=" + file.toUri().toString());
-				LOG.info("listStatus2 - filesystem=" + file.getFileSystem(conf).toString());
 			}
 		}
 		return fileStats.toArray(new FileStatus[0]);
@@ -432,8 +446,12 @@ public class SFTPFileSystem extends FileSystem {
 
 	@Override
 	public boolean exists(Path file) {
+		return exists(file, true);
+	}
+
+	private boolean exists(Path file, boolean retryIfNotExists) {
 		try {
-			return getFileStatus(file) != null;
+			return getFileStatus(file, retryIfNotExists) != null;
 		} catch (IOException e) {
 			return false;
 		}
