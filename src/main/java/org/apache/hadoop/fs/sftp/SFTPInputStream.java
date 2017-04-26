@@ -26,14 +26,14 @@ public class SFTPInputStream extends FSInputStream {
 		this.handle = handle;
 		this.stats = stats;
 		this.client = handle.getClient();
-		LOG.info("Creating file stream");
+		LOG.info("created input stream");
 	}
 
 	@Override
 	public void close() throws IOException {
 		LOG.info("closing input stream");
 		super.close();
-		//client.closeFile(handle);
+		client.closeFile(handle);
 		client.close();
 		if (client instanceof SFTPv3ClientWrapper) {
 			LOG.info("Closing specific connection");
@@ -55,18 +55,6 @@ public class SFTPInputStream extends FSInputStream {
 	@Override
 	public int read(long position, byte[] buf, int off, int len) throws IOException {
 		return readInternal(position, buf, off, len);
-//		int read = 1; 
-//		int total = 0; 
-//		while (read > 0 && len > 0) {
-//			read = readInternal(position + total, buf, off + total, len);
-//			if (read != -1) {
-//				total += read;
-//				len -= read;
-//			}
-//		}
-//		if (read == -1)
-//			return -1;
-//		return total;
 	}
 	
 	private int readInternal(long position, byte[] buf, int off, int len) throws IOException {
