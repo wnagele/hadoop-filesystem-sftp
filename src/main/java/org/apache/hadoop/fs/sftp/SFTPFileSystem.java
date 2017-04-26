@@ -69,7 +69,8 @@ public class SFTPFileSystem extends FileSystem {
 
 	
 	public static void main(String[] args) throws URISyntaxException, IOException, InterruptedException {
-		String url = "sftp:/a:b@c:22/Processed/20151121-Downloads.csv";
+		
+		String url = "sftp://telusupload:jGr0%2fBEiYjotsjBVtt5rRuhZb3g%3d@104.236.67.127:22/incoming/telus_report_activations_2017_03_31.csv";
 		URI uri = new URI(url);
 		SFTPFileSystem fs = new SFTPFileSystem();
 		fs.initialize(uri, new Configuration());
@@ -309,7 +310,8 @@ public class SFTPFileSystem extends FileSystem {
 		String newPath = dst.toUri().getPath();
 		
 		LOG.info("moving file: " + oldPath + " -> " + newPath);
-		
+
+		delete(dst, false);
 		for (int attempt = 1; true; attempt++) {
 			try {
 				getClient().mv(oldPath, newPath);	
