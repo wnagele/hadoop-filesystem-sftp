@@ -330,6 +330,8 @@ public class SFTPFileSystem extends FileSystem {
 
 	@Override
 	public boolean delete(Path file, boolean recursive) throws IOException {
+		if (!exists(file, false))
+			return false;
 		String path = file.toUri().getPath();
 		LOG.info("deleting file: " + path);
 		if (!getFileStatus(file, false).isDir()) {
