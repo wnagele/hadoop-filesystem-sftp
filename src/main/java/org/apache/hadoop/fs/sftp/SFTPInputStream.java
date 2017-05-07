@@ -33,7 +33,11 @@ public class SFTPInputStream extends FSInputStream {
 	public void close() throws IOException {
 		LOG.info("closing input stream");
 		super.close();
-		client.closeFile(handle);
+		try {
+			client.closeFile(handle);
+		} catch (IOException e) {
+			LOG.warn("SFTP file handle not closed properly: ", e);
+		}
 		client.close();
 		if (client instanceof SFTPv3ClientWrapper) {
 			LOG.info("Closing specific connection");

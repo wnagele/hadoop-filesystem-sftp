@@ -6,3 +6,5 @@
 # Maven
 target
 /bin
+deploy_jars.sh
+kube_deploy_jars.sh
