@@ -387,11 +387,23 @@ public class SFTPFileSystem extends FileSystem {
 						
 			} catch (SFTPException e) {
 				if (!retryIfNotExists || attempt >= maxAttempts) {
-					if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE)
+					if (e.getServerErrorCode() == ErrorCodes.SSH_FX_NO_SUCH_FILE) {
+						LOG.info("getFileStatus - file does not exist - " + file.toUri().toString());
 						throw new FileNotFoundException(file.toString());
+					}
+					LOG.debug("getFileStatus - couldn't complete request.", e);
 					throw e;
 				} else
 					LOG.debug("caught exception in attempt " + attempt + ", retrying: ", e);
+			} catch (IOException e) {
+				if (!retryIfNotExists || attempt >= maxAttempts) {
+					LOG.debug("getFileStatus - couldn't complete request.", e);
+					throw e;
+				} else
+					LOG.debug("caught exception in attempt " + attempt + ", retrying: ", e);
+			} catch (Throwable e) {
+				LOG.warn("Couldn't complete getFileStatus.", e);
+				throw e;
 			}
 			try {
 				Thread.sleep(retrySleep);
@@ -449,14 +461,14 @@ public class SFTPFileSystem extends FileSystem {
 	}
 
 	@Override
-	public boolean exists(Path file) {
+	public boolean exists(Path file) throws IOException {
 		return exists(file, true);
 	}
 
-	private boolean exists(Path file, boolean retryIfNotExists) {
+	private boolean exists(Path file, boolean retryIfNotExists) throws IOException {
 		try {
 			return getFileStatus(file, retryIfNotExists) != null;
-		} catch (IOException e) {
+		} catch (FileNotFoundException e) {
 			return false;
 		}
 	}
